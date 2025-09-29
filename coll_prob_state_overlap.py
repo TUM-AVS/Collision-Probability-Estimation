@@ -5,13 +5,6 @@ Following methods are implemented:
 2) Inclusion-Exclusion principle for rectangle (axis-aligned).
 1) Monte Carlo sampling get probability of point inside polygon.
 3) Analytic solution for point-in-polygon collision probability.
-
-    Implementation of methods proposed in following paper:
-         @article{Kaufeld-CollEstimation,
-              title={Precise and Efficient Collision Prediction under Uncertainty in Autonomous Driving},
-              author={Marc Kaufeld and Johannes Betz},
-              year={2025},
-         }
 """
 
 from typing import Optional

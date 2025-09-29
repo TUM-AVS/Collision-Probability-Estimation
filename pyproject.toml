@@ -4,12 +4,7 @@ dynamic = ["version"]
 description = "Library for estimating collision probabilities in dynamic environments."
 license = "LGPL-3.0-or-later"
 license-files = ["LICENSE"]
-authors = [
-    {name = "Marc Kaufeld", email = "marc.kaufeld@tum.de"},
-]
-maintainers = [
-    {name = "Marc Kaufeld", email = "marc.kaufeld@tum.de"},
-]
+
 
 readme = "README.md"
 
