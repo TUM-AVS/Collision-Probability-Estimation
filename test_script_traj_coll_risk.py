@@ -1,10 +1,3 @@
-__author__ = "Marc Kaufeld"
-__copyright__ = "TUM Professorship Autonomous Vehicle Systems"
-__version__ = "1.0"
-__maintainer__ = "Marc Kaufeld"
-__email__ = "marc.kaufeld@tum.de"
-__status__ = "Beta"
-
 import numpy as np
 from scipy.stats import multivariate_normal
 from utils import simple_prediction, visualize_traj_poly

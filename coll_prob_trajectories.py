@@ -1,10 +1,3 @@
-__author__ = "Marc Kaufeld"
-__copyright__ = "TUM Professorship Autonomous Vehicle Systems"
-__version__ = "1.0"
-__maintainer__ = "Marc Kaufeld"
-__email__ = "marc.kaufeld@tum.de"
-__status__ = "Beta"
-
 import re
 from typing import Optional
 import numpy as np

@@ -1,10 +1,3 @@
-__author__ = "Marc Kaufeld"
-__copyright__ = "TUM Professorship Autonomous Vehicle Systems"
-__version__ = "1.0"
-__maintainer__ = "Marc Kaufeld"
-__email__ = "marc.kaufeld@tum.de"
-__status__ = "Beta"
-
 """
 Collision probability estimation based on spatial overlap of polygon and point.
 Following methods are implemented:
@@ -15,7 +8,7 @@ Following methods are implemented:
 
     Implementation of methods proposed in following paper:
          @article{Kaufeld-CollEstimation,
-              title={Precise and Efficient Collision Prediction under Uncertainty in Autonomous Driving}, 
+              title={Precise and Efficient Collision Prediction under Uncertainty in Autonomous Driving},
               author={Marc Kaufeld and Johannes Betz},
               year={2025},
          }
@@ -269,13 +262,6 @@ def point_collvol_analytic(
 ):
     """
     Analytic solution for point-in-polygon collision probability.
-    Implementation of method proposed in following paper:
-        @article{Kaufeld-CollEstimation,
-            title={Precise and Efficient Collision Prediction under Uncertainty in Autonomous Driving},
-            author={Marc Kaufeld and Johannes Betz},
-            year={2025},
-        }
-
     Parameters:
         pos_mean (ndarray): Mean position of point (x, y [theta]).
         pos_cov (ndarray): 2x2 / 3x3 covariance matrix of point.
