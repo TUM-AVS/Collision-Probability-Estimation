@@ -2,25 +2,26 @@ from typing import Optional
 import numpy as np
 from scipy.stats import multivariate_normal, norm
 from scipy.special import erf
-
+import torch
+from torch.distributions import MultivariateNormal
 from shapely.geometry import Polygon
 from shapely import contains_xy
 
 # from params import SEED
-from params import SEED, NODES_XY, WEIGHTS_XY, NODES_THETA, WEIGHTS_THETA
+from params import SEED, NODES_XY, WEIGHTS_XY, NODES_THETA, WEIGHTS_THETA, THETA_NSTD
 import coll_state_overlap as cpo
 from utils import convolve_distributions, collision_polygon, simple_prediction
 
 
 def boundary_crossing(
-    poly1_boundary: list[np.ndarray],
-    dt: float = 0.1,
-    trajs1: Optional[list[np.ndarray]] = None,
-    trajs1_covs: Optional[list[np.ndarray]] = None,
-    trajs2: Optional[list[np.ndarray]] = None,
-    trajs2_covs: Optional[list[np.ndarray]] = None,
-    poly2_boundary: Optional[list[np.ndarray]] = None,
+    initial_obs1: list[np.ndarray] | np.ndarray,
+    trajs_obs1: list[np.ndarray] | np.ndarray,
+    trajs_obs2: list[np.ndarray] | np.ndarray,
+    trajs_obs1_covs: Optional[list[np.ndarray] | np.ndarray] = None,
+    trajs_obs2_covs: Optional[list[np.ndarray] | np.ndarray] = None,
+    initial_obs2: Optional[list[np.ndarray] | np.ndarray] = None,
     with_orientation: bool = False,
+    dt=0.1,
 ):
     """
     Estimate collision probability over trajectories for each combinations of trajectories using boundary crossing method.
@@ -47,79 +48,117 @@ def boundary_crossing(
         Estimated collision probability over the trajectories.
     """
 
-    # Validate input shapes and lengths
-    if trajs1 is not None and trajs2 is not None:
-        assert len(poly1_boundary) == len(trajs1) == len(trajs1_covs) and len(
-            trajs2
-        ) == len(trajs2_covs), (
-            f"inputs poly1 ({len(poly1_boundary)}), trajs1 ({len(trajs1)}), trajs1_covs ({len(trajs1_covs)}) lengths must match, "
-            f"as well as trajs2 ({len(trajs2)}), trajs2_covs ({len(trajs2_covs)}) lengths must match."
-        )
+    initial_obs1 = np.asarray(initial_obs1)
+    trajs1 = np.asarray(trajs_obs1)
+    trajs2 = np.asarray(trajs_obs2)[None]
+    trajs1_covs = np.asarray(trajs_obs1_covs) if trajs_obs1_covs is not None else None
+    trajs2_covs = np.asarray(trajs_obs2_covs) if trajs_obs2_covs is not None else None
+    initial_obs2 = np.asarray(initial_obs2) if initial_obs2 is not None else None
+    if trajs1.ndim == 2:
+        trajs1 = trajs1[None, ...]
+    if initial_obs1.ndim == 2:
+        initial_obs1 = initial_obs1[None, ...]
+    trajs1 = trajs1[:, None]
+    if trajs2.ndim == 3:
+        trajs2 = trajs2[None, ...]
+    if trajs1_covs is not None:
+        if trajs1_covs.ndim == 3:
+            trajs1_covs = trajs1_covs[None]
+        trajs1_covs = trajs1_covs[:, None]
+    if trajs2_covs is not None:
+        if trajs2_covs.ndim == 3:
+            trajs2_covs = trajs2_covs[None]
+        trajs2_covs = trajs2_covs[None]
+    if initial_obs2 is not None and initial_obs2.ndim == 2:
+        initial_obs2 = initial_obs2[None, ...]
 
-        rel_traj, rel_cov = convolve_distributions(
-            trajs1, trajs1_covs, trajs2, trajs2_covs
-        )
-    elif trajs1 is not None:
-        assert (
-            len(poly1_boundary) == len(trajs1) == len(trajs1_covs)
-        ), f"inputs poly1 ({len(poly1_boundary)}), trajs1 ({len(trajs1)}), trajs1_covs ({len(trajs1_covs)}) lengths must match."
-        # in obs1 local frame
-        rel_traj, rel_cov = -np.asarray(trajs1 * len(poly2_boundary)), np.asarray(
-            trajs1_covs * len(poly2_boundary)
-        )
-        rel_traj[..., :3] += np.repeat(
-            np.mean(poly2_boundary, axis=-2), len(trajs1), axis=0
-        )[:, None]
-    elif trajs2 is not None:  # trajs2 is not None
-        assert len(trajs2) == len(
-            trajs2_covs
-        ), f"inputs trajs2 ({len(trajs2)}), trajs2_covs ({len(trajs2_covs)}) lengths must match."
-        rel_traj, rel_cov = np.asarray(trajs2 * len(poly1_boundary)), np.asarray(
-            trajs2_covs * len(poly1_boundary)
-        )
-    else:
-        raise ValueError("Either trajs1 or trajs2 must be provided.")
+    assert (
+        trajs1.ndim == trajs2.ndim == 4 and trajs1.shape[-2:] == trajs2.shape[-2:]
+    ), f"trajs1 and trajs2 must be list of trajectories with shape (N_traj, N_steps, state_dim), got {trajs1.shape} and {trajs2.shape}."
+    assert (
+        len(initial_obs1) == len(trajs1)
+        and (trajs1_covs is None or trajs1_covs.shape[:-2] == trajs1.shape[:-1])
+        and (initial_obs2 is None or len(initial_obs2) == trajs2.shape[1])
+        and (trajs2_covs is None or trajs2_covs.shape[:-2] == trajs2.shape[:-1])
+    ), (
+        f"inputs poly1 ({len(initial_obs1)}), trajs1 ({len(trajs1)}), trajs1_covs ({0 if trajs1_covs is None else len(trajs1_covs)}) lengths must match, "
+        f"as well as trajs2 ({len(trajs2)}), trajs2 covs ({0 if trajs2_covs is None else len(trajs2_covs)}) lengths must match, "
+        f"and poly2 ({0 if initial_obs2 is None else len(initial_obs2)}) lengths must match trajs2."
+    )
+    rel_trajs, rel_covs = convolve_distributions(
+        trajs1, trajs1_covs, trajs2, trajs2_covs
+    )
+    if rel_covs is None:
+        raise NotImplementedError("Analytic solution not implemented for this case.")
 
-    if poly2_boundary is not None:
-        polys2 = np.array(
-            [
-                poly2_boundary[i]
-                for i in range(len(poly2_boundary))
-                for j in range(len(poly1_boundary))
-            ]
-        )
-        polys1 = np.array(
-            [
-                poly1_boundary[j]
-                for i in range(len(poly2_boundary))
-                for j in range(len(poly1_boundary))
-            ]
-        )
+    obs1 = initial_obs1 - np.mean(
+        initial_obs1, axis=-2, keepdims=True
+    )  # center polygon
+    obs1_ext = (
+        obs1[:, None, None]
+        .repeat(rel_trajs.shape[1], axis=1)
+        .repeat(rel_trajs.shape[2], axis=2)
+    )  # (N_traj1, N_traj2, 1, N_corners, 3)
 
-        delta_theta = rel_traj[..., 2] - polys2[..., 0, -1, None]
-        rot_mats = np.zeros((*delta_theta.shape, 3, 3))
+    theta_mean = rel_trajs[..., 2]
+    if initial_obs2 is not None:
+        obs2 = initial_obs2 - np.mean(initial_obs2, axis=-2, keepdims=True)
+        obs2[..., -1] = initial_obs2[..., -1]
+        delta_theta = theta_mean - initial_obs2[None, ..., 0, -1, None]
+        rot2 = np.zeros((*delta_theta.shape, 3, 3))
         costheta = np.cos(delta_theta)
         sintheta = np.sin(delta_theta)
-        rot_mats[..., 0, 0] = costheta
-        rot_mats[..., 0, 1] = sintheta
-        rot_mats[..., 1, 0] = -sintheta
-        rot_mats[..., 1, 1] = costheta
-        rot_mats[..., 2, 2] = 1
-
-        rel_polys2 = polys2[:, None] @ rot_mats
-        polys1 = polys1[:, None].repeat(rel_polys2.shape[1], axis=1)
-        poly_boundary, _ = collision_polygon(polys1, rel_polys2)
+        rot2[..., 0, 0] = costheta
+        rot2[..., 0, 1] = sintheta
+        rot2[..., 1, 0] = -sintheta
+        rot2[..., 1, 1] = costheta
+        rot2[..., 2, 2] = 1.0
+        obs_rot2 = obs2[None, :, None] @ rot2  # + rel_trajs[..., None, :3]
+        obs_rot2[..., -1] += delta_theta[..., None]
+        if with_orientation and rel_covs is not None and rel_covs.shape[-1] >= 3:
+            theta_std = np.sqrt(rel_covs[..., 2, 2])
+            # convert nodes from [-1, 1] to [theta_mean - THETA_NSTD*theta_std, theta_mean + THETA_NSTD*theta_std]
+            delta_theta_gauss = (
+                THETA_NSTD * NODES_THETA[:, None, None, None] * theta_std
+            )
+            theta_gauss = delta_theta_gauss + theta_mean
+            theta_jacobian = THETA_NSTD * theta_std
+            rot_theta = np.zeros((*delta_theta_gauss.shape, 3, 3))
+            costheta = np.cos(delta_theta_gauss)
+            sintheta = np.sin(delta_theta_gauss)
+            rot_theta[..., 0, 0] = costheta
+            rot_theta[..., 0, 1] = sintheta
+            rot_theta[..., 1, 0] = -sintheta
+            rot_theta[..., 1, 1] = costheta
+            rot_theta[..., 2, 2] = 1.0
+            obs_rot2 = obs_rot2 @ rot_theta
+            obs_rot2[..., -1] += delta_theta_gauss[..., None]
+            obs1_ext = obs1_ext[None].repeat(obs_rot2.shape[0], axis=0)
+        collvol, _ = collision_polygon(obs1_ext, obs_rot2)
+        # np.max(points - rel_trajs[...,None, :3])
+        # import matplotlib.pyplot as plt
+        # fig, ax = plt.subplots()
+        # for i in range(collvol.shape[2]):
+        #     poly = plt.Polygon(
+        #         collvol[0,1,i, :, :2],
+        #         closed=True,
+        #         edgecolor="#E37222",
+        #         facecolor="none",
+        #         linewidth=1,
+        #         linestyle="--",
+        #         alpha=1,
+        #         zorder=13,
+        #     )
+        #     ax.add_patch(poly)
     else:
-        poly_boundary = np.array(
-            poly1_boundary * int(len(rel_traj) / len(poly1_boundary))
-        )[:, None].repeat(rel_traj.shape[1], axis=1)
-    poly_boundary = poly_boundary - np.mean(
-        poly_boundary, axis=-2, keepdims=True
-    )  # center polygon bc of ref_traj
-    cov_x = rel_cov[..., :3, :3]  # (T,3,3)
-    cov_v = rel_cov[..., 3:, 3:]  # (T,2,2)
-    cov_xv = rel_cov[..., :3, 3:]  # (T,3,2)
-    cov_vx = rel_cov[..., 3:, :3]  # (T,2,3)
+        # collvol, points = collision_polygon(obs1, obs2)
+        if with_orientation:
+            raise NotImplementedError
+        collvol = initial_obs2[None]
+    cov_x = rel_covs[..., :3, :3]  # (T,3,3)
+    cov_v = rel_covs[..., 3:, 3:]  # (T,2,2)
+    cov_xv = rel_covs[..., :3, 3:]  # (T,3,2)
+    cov_vx = rel_covs[..., 3:, :3]  # (T,2,3)
     inv_cov_x = np.linalg.inv(cov_x)
     K = cov_vx @ inv_cov_x
     cov_vifx = cov_v - K @ cov_xv
@@ -127,11 +166,11 @@ def boundary_crossing(
         cov_vifx.shape[-1], dtype=cov_vifx.dtype
     )
 
-    mu_pos = rel_traj[..., :3]  # (T,3)
-    mu_v = rel_traj[..., 3:]  # (T,2)
+    mu_pos = rel_trajs[..., :3]  # (T,3)
+    mu_v = rel_trajs[..., 3:]  # (T,2)
 
     # --- Shift octagon by trajectory mean ---
-    delta_pos = poly_boundary - mu_pos[..., None, :]
+    delta_pos = collvol - mu_pos[..., None, :]
     # --- Get outward normals of octagon edges ---
     p1 = delta_pos
     p2 = np.roll(p1, -1, axis=-2)  # next corner
@@ -143,27 +182,17 @@ def boundary_crossing(
     normals[..., 1] = side_vecs[..., 0] / edge_lengths
 
     # --- Gauss-Legendre quadrature ---
-    nodes_expanded = NODES_XY[:, None, None, None, None]  # (n_nodes, 1, 1)
-    weights_xy_expanded = WEIGHTS_XY[:, None, None, None]  # (n_nodes, 1, 1)
+    nodes_expanded = NODES_XY[:, *[None] * p1.ndim]  # (n_nodes, 1, 1)
+    weights_xy_expanded = WEIGHTS_XY[:, *[None] * (p1.ndim - 1)]  # (n_nodes, 1, 1)
     edge_points = 0.5 * (1 - nodes_expanded) * p1 + 0.5 * (1 + nodes_expanded) * p2
-
+    # neu = edge_points - mu_pos[...,None,:]
     # --- Conditional velocity at each edge point ---
-    mu_vifx_edge = mu_v[None, :, :, None] + np.einsum(
-        "bcij,...bcnj -> ...bcni", K, edge_points
-    )  # (num_quad,T,1,8,2)
+    mu_vifx_edge = mu_v[None, ..., None, :] + edge_points @ K.swapaxes(-1, -2)
+
     # Velocity along normal
     v_n_mean = (mu_vifx_edge * normals[None, ...]).sum(-1)  # (num_quad,T,1,8)
     v_n_var = (
-        (
-            normals[..., None, :]
-            @ cov_vifx[
-                ...,
-                None,
-                :,
-                :,
-            ]
-            @ normals[..., None]
-        )
+        (normals[..., None, :] @ cov_vifx[..., None, :, :] @ normals[..., None])
         .squeeze(-1)
         .squeeze(-1)
     )  # (T,1,8)
@@ -183,7 +212,7 @@ def boundary_crossing(
     ) / (cov_x[..., 2, 2][..., None, None])
     inv_cov_x = np.linalg.inv(cov_xiftheta)  # (T,3,3)
     det_cov_x = np.linalg.det(cov_xiftheta)  # (T,)
-    mahal = np.einsum("...bcdi,bcij,...bcdj->...bcd", delta_pdf, inv_cov_x, delta_pdf)
+    mahal = np.einsum("...di,...ij,...dj->...d", delta_pdf, inv_cov_x, delta_pdf)
     p_x = (1 / (2 * np.pi * np.sqrt(det_cov_x[None, ..., None]))) * np.exp(-0.5 * mahal)
     integrand = E_vn_trunc * p_x
     # --- Integrate along edge with Gauss-Legendre quadrature and multiply by edge length ---
@@ -192,10 +221,19 @@ def boundary_crossing(
         axis=-1,
         dtype=cov_vifx.dtype,
     )  # (T,)
-
-    coll_prob = np.trapz(cep, dx=dt, axis=-1)
+    if with_orientation:
+        theta_pdf = norm(loc=theta_mean, scale=theta_std).pdf(theta_gauss)
+        cep = np.sum(
+            cep
+            * theta_pdf
+            * WEIGHTS_THETA[:, *[None] * (theta_pdf.ndim - 1)]
+            * theta_jacobian,
+            axis=0,
+        )
+    coll_prob = np.trapezoid(cep, dx=dt, axis=-1)
     coll_prob = np.clip(coll_prob, None, 1)
-    return coll_prob
+    p_cum = np.clip(np.cumsum(cep, axis=-1) * dt, None, 1.0)
+    return coll_prob, p_cum
 
 
 def point_collvol_mc_state_sampling(
@@ -211,30 +249,35 @@ def point_collvol_mc_state_sampling(
 
     initial_obs1 = np.asarray(initial_obs1)
     trajs1 = np.asarray(trajs_obs1)
-    trajs2 = np.asarray(trajs_obs2)
+    trajs2 = np.asarray(trajs_obs2)[None]
     trajs1_covs = np.asarray(trajs_obs1_covs) if trajs_obs1_covs is not None else None
     trajs2_covs = np.asarray(trajs_obs2_covs) if trajs_obs2_covs is not None else None
     initial_obs2 = np.asarray(initial_obs2) if initial_obs2 is not None else None
     if trajs1.ndim == 2:
         trajs1 = trajs1[None, ...]
+    if initial_obs1.ndim == 2:
         initial_obs1 = initial_obs1[None, ...]
-
-    if trajs2.ndim == 2:
+    trajs1 = trajs1[:, None]
+    if trajs2.ndim == 3:
         trajs2 = trajs2[None, ...]
-    if trajs1_covs is not None and trajs1_covs.ndim == 3:
-        trajs1_covs = trajs1_covs[None, ...]
-    if trajs2_covs is not None and trajs2_covs.ndim == 3:
-        trajs2_covs = trajs2_covs[None, ...]
+    if trajs1_covs is not None:
+        if trajs1_covs.ndim == 3:
+            trajs1_covs = trajs1_covs[None]
+        trajs1_covs = trajs1_covs[:, None]
+    if trajs2_covs is not None:
+        if trajs2_covs.ndim == 3:
+            trajs2_covs = trajs2_covs[None]
+        trajs2_covs = trajs2_covs[None]
     if initial_obs2 is not None and initial_obs2.ndim == 2:
         initial_obs2 = initial_obs2[None, ...]
 
     assert (
-        trajs1.ndim == trajs2.ndim == 3 and trajs1.shape[-2:] == trajs2.shape[-2:]
+        trajs1.ndim == trajs2.ndim == 4 and trajs1.shape[-2:] == trajs2.shape[-2:]
     ), f"trajs1 and trajs2 must be list of trajectories with shape (N_traj, N_steps, state_dim), got {trajs1.shape} and {trajs2.shape}."
     assert (
         len(initial_obs1) == len(trajs1)
         and (trajs1_covs is None or trajs1_covs.shape[:-2] == trajs1.shape[:-1])
-        and (initial_obs2 is None or len(initial_obs2) == len(trajs2))
+        and (initial_obs2 is None or len(initial_obs2) == trajs2.shape[1])
         and (trajs2_covs is None or trajs2_covs.shape[:-2] == trajs2.shape[:-1])
     ), (
         f"inputs poly1 ({len(initial_obs1)}), trajs1 ({len(trajs1)}), trajs1_covs ({0 if trajs1_covs is None else len(trajs1_covs)}) lengths must match, "
@@ -242,14 +285,14 @@ def point_collvol_mc_state_sampling(
         f"and poly2 ({0 if initial_obs2 is None else len(initial_obs2)}) lengths must match trajs2."
     )
     rel_trajs, rel_covs = convolve_distributions(
-        trajs1[:, None], trajs1_covs[:, None], trajs2[None], trajs2_covs[None]
+        trajs1, trajs1_covs, trajs2, trajs2_covs
     )
 
     d1 = np.max(np.linalg.norm(np.diff(initial_obs1, axis=-2), axis=-1), axis=-1)
     d2 = (
         np.max(np.linalg.norm(np.diff(initial_obs2, axis=-2), axis=-1), axis=-1)
         if np.any(initial_obs2)
-        else 0
+        else np.array(0)
     )
     d_max = d1[:, None] + d2[None]
 
@@ -295,157 +338,156 @@ def point_collvol_mc_state_sampling(
 
 
 def point_collvol_mc_traj_sampling(
-    initial_poly1_boundary: list[np.ndarray] | np.ndarray,
-    initial_state_1: list[np.ndarray] | np.ndarray,
-    initial_state_2: list[np.ndarray] | np.ndarray,
-    initial_cov_1: Optional[list[np.ndarray] | np.ndarray] = None,
-    initial_cov_2: Optional[list[np.ndarray] | np.ndarray] = None,
-    initial_poly2_boundary: Optional[list[np.ndarray] | np.ndarray] = None,
+    initial_obs1: list[np.ndarray] | np.ndarray,
+    initial_state1: list[np.ndarray] | np.ndarray,
+    initial_state2: list[np.ndarray] | np.ndarray,
+    initial_cov1: Optional[list[np.ndarray] | np.ndarray] = None,
+    initial_cov2: Optional[list[np.ndarray] | np.ndarray] = None,
+    initial_obs2: Optional[list[np.ndarray] | np.ndarray] = None,
     dt=0.1,
+    num_traj_steps: int = 30,
     with_orientation: bool = False,
     num_samples: int = 20000,
 ):
 
-    idx = 3 if with_orientation else 2
+    initial_obs1 = np.asarray(initial_obs1)
+    initial_state1 = np.asarray(initial_state1)
+    initial_state2 = np.asarray(initial_state2)[None]
+    initial_cov1 = np.asarray(initial_cov1) if initial_cov1 is not None else None
+    initial_cov2 = np.asarray(initial_cov2) if initial_cov2 is not None else None
+    initial_obs2 = np.asarray(initial_obs2) if initial_obs2 is not None else None
+    if initial_state1.ndim == 1:
+        initial_state1 = initial_state1[None, ...]
+        initial_obs1 = initial_obs1[None, ...]
+    initial_state1 = initial_state1[:, None]
+    if initial_state2.ndim == 2:
+        initial_state2 = initial_state2[None, ...]
+    if initial_cov1 is not None:
+        if initial_cov1.ndim == 2:
+            initial_cov1 = initial_cov1[None]
+        initial_cov1 = initial_cov1[:, None]
+    if initial_cov2 is not None:
+        if initial_cov2.ndim == 2:
+            initial_cov2 = initial_cov2[None]
+        initial_cov2 = initial_cov2[None]
+    if initial_obs2 is not None and initial_obs2.ndim == 2:
+        initial_obs2 = initial_obs2[None, ...]
 
-    initial_poly1_boundary = np.asarray(initial_poly1_boundary)
-    initial_state_1 = np.asarray(initial_state_1)
-    initial_state_2 = np.asarray(initial_state_2)
-    initial_cov_1 = np.asarray(initial_cov_1) if initial_cov_1 is not None else None
-    initial_cov_2 = np.asarray(initial_cov_2) if initial_cov_2 is not None else None
-    initial_poly2_boundary = (
-        np.asarray(initial_poly2_boundary)
-        if initial_poly2_boundary is not None
-        else None
+    assert (
+        initial_state1.ndim == initial_state2.ndim == 3
+    ), f"initial_state1 and initial_state2 must be list of states with shape (N_traj, state_dim), got {initial_state1.shape} and {initial_state2.shape}."
+    assert (
+        len(initial_obs1) == len(initial_state1)
+        and (
+            initial_cov1 is None or initial_cov1.shape[:-2] == initial_state1.shape[:-1]
+        )
+        and (initial_obs2 is None or len(initial_obs2) == initial_state2.shape[1])
+        and (
+            initial_cov2 is None or initial_cov2.shape[:-2] == initial_state2.shape[:-1]
+        )
+    ), (
+        f"inputs poly1 ({len(initial_obs1)}), trajs1 ({len(initial_state1)}), trajs1_covs ({0 if initial_cov1 is None else len(initial_cov1)}) lengths must match, "
+        f"as well as trajs2 ({len(initial_state2)}), trajs2 covs ({0 if initial_cov2 is None else len(initial_cov2)}) lengths must match, "
+        f"and poly2 ({0 if initial_obs2 is None else len(initial_obs2)}) lengths must match trajs2."
+    )
+    rel_points, rel_covs = convolve_distributions(
+        initial_state1, initial_cov1, initial_state2, initial_cov2
     )
 
-    if initial_state_1.ndim == 1:
-        initial_state_1 = initial_state_1[None, ...]
-        initial_poly1_boundary = initial_poly1_boundary[None, ...]
+    # Sample random points, if no covariance provided test whether point is inside polygon
+    if not with_orientation:
+        rel_covs[..., 2, 2] = 1e-8
 
-    if initial_state_2.ndim == 1:
-        initial_state_2 = initial_state_2[None, ...]
-    if initial_cov_1 is not None and initial_cov_1.ndim == 2:
-        initial_cov_1 = initial_cov_1[None, ...]
-    if initial_cov_2 is not None and initial_cov_2.ndim == 2:
-        initial_cov_2 = initial_cov_2[None, ...]
-    if initial_poly2_boundary is not None and initial_poly2_boundary.ndim == 2:
-        initial_poly2_boundary = initial_poly2_boundary[None, ...]
+    points = (
+        MultivariateNormal(
+            loc=torch.tensor(initial_state2),
+            covariance_matrix=torch.tensor(rel_covs),
+        )
+        .sample((num_samples,))
+        .numpy()
+        if np.any(rel_covs)
+        else initial_state2[np.newaxis]
+    )
+    covs = np.repeat(rel_covs[np.newaxis], num_samples, axis=0)
+    rel_trajs, rel_cov = simple_prediction(
+        points, covs, dt=dt, num_steps=num_traj_steps
+    )
+    import matplotlib.pyplot as plt
 
-    # if poly1_cov is not None and (point_cov is not None or poly2_cov is not None):
-    coll_probs = []
-    p_cums = []
-    masks = []
-    trajs = []
-    for i, (poly1, ini_state1) in enumerate(
-        zip(initial_poly1_boundary, initial_state_1)
-    ):
-        poly1 = poly1 - np.mean(poly1, axis=-2)  # center polygon
-        coll_probs_traj2 = []
-        p_cums_traj2 = []
-        masks_traj2 = []
-        trajs_traj2 = []
-        for j, ini_state2 in enumerate(initial_state_2):
+    # fig, ax = plt.subplots()
+    # for traj in rel_trajs:
+    #     ax.plot(traj[0, 1, :, 0], traj[0, 1, :, 1])
 
-            if initial_cov_2 is not None and initial_cov_1 is not None:
-                _, rel_cov = convolve_distributions(
-                    0, initial_cov_1[i], 0, initial_cov_2[j], dist="Gaussian"
+    obs1 = initial_obs1 - np.mean(initial_obs1, axis=-2, keepdims=True)
+    obs1_ext = obs1[:, None].repeat(rel_trajs.shape[2], axis=1)
+    if initial_obs2 is not None:
+        obs2 = initial_obs2 - np.mean(initial_obs2, axis=-2, keepdims=True)
+        obs2_ext = obs2[None, :].repeat(rel_trajs.shape[1], axis=0)
+        if with_orientation:
+            delta_theta = rel_trajs[..., 0, 2] - initial_obs2[..., 0, -1]
+            # delta_theta = np.sort(delta_theta, axis=0)
+            rot2 = np.zeros((*delta_theta.shape, 3, 3))
+            costheta = np.cos(delta_theta)
+            sintheta = np.sin(delta_theta)
+            rot2[..., 0, 0] = costheta
+            rot2[..., 0, 1] = sintheta
+            rot2[..., 1, 0] = -sintheta
+            rot2[..., 1, 1] = costheta
+            rot2[..., 2, 2] = 1.0
+            obs2_ext = obs2_ext @ rot2  # + rel_trajs[..., None, :3]
+            obs1_ext = obs1_ext[None].repeat(obs2_ext.shape[0], axis=0)
+
+        collvol, _ = collision_polygon(obs1_ext, obs2_ext)
+
+        # import matplotlib.pyplot as plt
+
+        # fig, ax = plt.subplots()
+        # for i in range(collvol.shape[0]):
+        #     poly = plt.Polygon(
+        #         collvol[i, 0, 1, :, :2],
+        #         closed=True,
+        #         edgecolor="#E37222",
+        #         facecolor="none",
+        #         linewidth=1,
+        #         linestyle="--",
+        #         alpha=1,
+        #         zorder=13,
+        #     )
+        #     ax.add_patch(poly)
+
+    else:
+        collvol = initial_obs1
+
+    all_trajs = rel_trajs.reshape(num_samples, -1, *rel_trajs.shape[-2:])
+    all_collvols = collvol.reshape(collvol.shape[0], -1, *collvol.shape[-2:])
+    overlap = []
+    if with_orientation:
+        for i in range(all_collvols.shape[1]):
+            tmp = []
+            for j in range(num_samples):
+                poly = Polygon(all_collvols[j, i, :, :2])
+                tmp.append(
+                    contains_xy(poly, all_trajs[j, i, :, 0], all_trajs[j, i, :, 1])
                 )
-            elif initial_cov_2 is not None:
-                rel_cov = initial_cov_2[j]
-            elif initial_cov_1 is not None:
-                rel_cov = initial_cov_1[i]
-            else:
-                rel_cov = None
-            rel_state = ini_state2 - ini_state1
+            overlap.append(tmp)
+    else:
 
-            mc_points = multivariate_normal(
-                mean=rel_state, cov=rel_cov, seed=SEED, allow_singular=True
-            ).rvs(size=num_samples)
-            MC_rel_trajs, MC_rel_cov = simple_prediction(mc_points, rel_cov, dt=dt)
-
-            poly2 = (
-                initial_poly2_boundary[j]
-                if initial_poly2_boundary is not None
-                else None
+        for i in range(all_collvols.shape[1]):
+            poly = Polygon(all_collvols[0, i, :, :2])
+            overlap.append(
+                contains_xy(poly, all_trajs[:, i, :, 0], all_trajs[:, i, :, 1])
             )
-            if poly2 is not None:
-                if with_orientation:
-                    delta_theta = mc_points[..., idx - 1] - rel_state[..., idx - 1]
-                    rot_theta = np.zeros((*delta_theta.shape, 3, 3))
-                    costheta = np.cos(delta_theta)
-                    sintheta = np.sin(delta_theta)
-                    rot_theta[..., 0, 0] = costheta
-                    rot_theta[..., 0, 1] = sintheta
-                    rot_theta[..., 1, 0] = -sintheta
-                    rot_theta[..., 1, 1] = costheta
-                    rot_theta[..., 2, 2] = 1.0
-                    poly2 = poly2 @ rot_theta
-                    poly1 = poly1[None].repeat(poly2.shape[0], axis=0)
-                    collvol, _ = collision_polygon(poly1, poly2)
-                else:
-                    collvol, _ = collision_polygon(poly1, poly2)
-                    collvol = collvol[None]
-            else:
-                if (
-                    with_orientation
-                    and initial_cov_1 is not None
-                    and initial_cov_1[i].shape[-1] >= 3
-                ):
-                    theta_std = np.sqrt(initial_cov_1[i, 2, 2])
-                    delta_theta = norm(scale=theta_std).rvs(
-                        size=num_samples, random_state=SEED
-                    )
-                    rot_theta = np.zeros((*delta_theta.shape, 3, 3))
-                    costheta = np.cos(delta_theta)
-                    sintheta = np.sin(delta_theta)
-                    rot_theta[..., 0, 0] = costheta
-                    rot_theta[..., 0, 1] = sintheta
-                    rot_theta[..., 1, 0] = -sintheta
-                    rot_theta[..., 1, 1] = costheta
-                    rot_theta[..., 2, 2] = 1.0
-
-                    collvol = poly1 @ rot_theta
-                else:
-                    collvol = poly1[None]
-            if with_orientation:
-                overlap = []
-                for i in range(collvol.shape[0]):
-                    poly = Polygon(collvol[i, :, :2])
-                    overlap.append(
-                        contains_xy(poly, MC_rel_trajs[i, :, 0], MC_rel_trajs[i, :, 1])
-                    )
-                overlap = np.asarray(overlap)  # (num_samples, N_steps)
-            else:
-                poly = Polygon(collvol[0, :, :2])
-                overlap = contains_xy(
-                    poly, MC_rel_trajs[:, :, 0], MC_rel_trajs[:, :, 1]
-                )  # (num_samples, N_steps)
-
-            entered = np.diff(overlap.astype(int), prepend=1, axis=1) == 1
-            new_entries_per_timestep = np.sum(entered, axis=0)
-            # print("New entries per timestep:", new_entries_per_timestep)
-            # Probability of new entries per timestep
-            v1 = new_entries_per_timestep / num_samples
-            overlap_prob = np.sum(v1)  # Approximate integral over time by summation
-            prob_rate = v1 / dt
-            inside_mask = np.any(overlap, axis=1)
-            p_cum = np.clip(np.cumsum(prob_rate) * dt, None, 1.0)
-            coll_probs_traj2.append(overlap_prob)
-            p_cums_traj2.append(p_cum)
-            masks_traj2.append(inside_mask)
-            trajs_traj2.append(MC_rel_trajs)
-
-        coll_probs.append(coll_probs_traj2)
-        p_cums.append(p_cums_traj2)
-        masks.append(masks_traj2)
-        trajs.append(trajs_traj2)
-
-    coll_probs = np.asarray(coll_probs)
-    p_cums = np.asarray(p_cums)
-    masks = np.asarray(masks)
-    trajs = np.asarray(trajs)
-    return coll_probs, p_cums, {"trajs": trajs, "overlap_mask": masks}
+    overlap = np.asarray(overlap)
+    overlap = overlap.reshape(rel_trajs.shape[1], -1, *overlap.shape[-2:])
+    entered = np.diff(overlap.astype(int), prepend=1, axis=-1) == 1
+    new_entries_per_timestep = np.sum(entered, axis=-2)
+    # Probability of new entries per timestep
+    v1 = new_entries_per_timestep / num_samples
+    coll_probs = np.sum(v1, axis=-1)  # Approximate integral over time by summation
+    prob_rate = v1 / dt
+    inside_mask = np.any(overlap, axis=-1)
+    p_cums = np.clip(np.cumsum(prob_rate, axis=-1) * dt, None, 1.0)
+    return coll_probs, p_cums, {"trajs": rel_trajs, "overlap_mask": inside_mask}
 
 
 def traj_collvol_analytic(
@@ -457,33 +499,39 @@ def traj_collvol_analytic(
     initial_obs2: Optional[list[np.ndarray] | np.ndarray] = None,
     with_orientation: bool = False,
 ):
+    # assert not with_orientation, "with_orientation=True not implemented yet."
 
     initial_obs1 = np.asarray(initial_obs1)
     trajs1 = np.asarray(trajs_obs1)
-    trajs2 = np.asarray(trajs_obs2)
+    trajs2 = np.asarray(trajs_obs2)[None]
     trajs1_covs = np.asarray(trajs_obs1_covs) if trajs_obs1_covs is not None else None
     trajs2_covs = np.asarray(trajs_obs2_covs) if trajs_obs2_covs is not None else None
     initial_obs2 = np.asarray(initial_obs2) if initial_obs2 is not None else None
     if trajs1.ndim == 2:
         trajs1 = trajs1[None, ...]
+    if initial_obs1.ndim == 2:
         initial_obs1 = initial_obs1[None, ...]
-
-    if trajs2.ndim == 2:
+    trajs1 = trajs1[:, None]
+    if trajs2.ndim == 3:
         trajs2 = trajs2[None, ...]
-    if trajs1_covs is not None and trajs1_covs.ndim == 3:
-        trajs1_covs = trajs1_covs[None, ...]
-    if trajs2_covs is not None and trajs2_covs.ndim == 3:
-        trajs2_covs = trajs2_covs[None, ...]
+    if trajs1_covs is not None:
+        if trajs1_covs.ndim == 3:
+            trajs1_covs = trajs1_covs[None]
+        trajs1_covs = trajs1_covs[:, None]
+    if trajs2_covs is not None:
+        if trajs2_covs.ndim == 3:
+            trajs2_covs = trajs2_covs[None]
+        trajs2_covs = trajs2_covs[None]
     if initial_obs2 is not None and initial_obs2.ndim == 2:
         initial_obs2 = initial_obs2[None, ...]
 
     assert (
-        trajs1.ndim == trajs2.ndim == 3 and trajs1.shape[-2:] == trajs2.shape[-2:]
+        trajs1.ndim == trajs2.ndim == 4 and trajs1.shape[-2:] == trajs2.shape[-2:]
     ), f"trajs1 and trajs2 must be list of trajectories with shape (N_traj, N_steps, state_dim), got {trajs1.shape} and {trajs2.shape}."
     assert (
         len(initial_obs1) == len(trajs1)
         and (trajs1_covs is None or trajs1_covs.shape[:-2] == trajs1.shape[:-1])
-        and (initial_obs2 is None or len(initial_obs2) == len(trajs2))
+        and (initial_obs2 is None or len(initial_obs2) == trajs2.shape[1])
         and (trajs2_covs is None or trajs2_covs.shape[:-2] == trajs2.shape[:-1])
     ), (
         f"inputs poly1 ({len(initial_obs1)}), trajs1 ({len(trajs1)}), trajs1_covs ({0 if trajs1_covs is None else len(trajs1_covs)}) lengths must match, "
@@ -491,7 +539,7 @@ def traj_collvol_analytic(
         f"and poly2 ({0 if initial_obs2 is None else len(initial_obs2)}) lengths must match trajs2."
     )
     rel_trajs, rel_covs = convolve_distributions(
-        trajs1[:, None], trajs1_covs[:, None], trajs2[None], trajs2_covs[None]
+        trajs1, trajs1_covs, trajs2, trajs2_covs
     )
 
     d1 = np.max(np.linalg.norm(np.diff(initial_obs1, axis=-2), axis=-1), axis=-1)

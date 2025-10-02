@@ -11,7 +11,7 @@ from typing import Optional
 
 import numpy as np
 import torch
-from torch.distributions import MultivariateNormal
+from torch.distributions import MultivariateNormal, Normal
 from scipy.stats import multivariate_normal, norm
 from shapely.geometry import Polygon
 from shapely import contains_xy
@@ -165,7 +165,7 @@ def point_collvol_mc_sampling(
         float: Estimated collision probability.
         dict: Additional data (sampled points, inside mask).
     """
-    idx = 3 if with_orientation else 2
+    seg_idx = 3 if with_orientation else 2
     if obs2.ndim == 1:
         obs2 = obs2[np.newaxis, :]
     obs1_center = np.mean(obs1, axis=-2)
@@ -182,18 +182,17 @@ def point_collvol_mc_sampling(
     # Sample random points, if no covariance provided test whether point is inside polygon
     points = (
         MultivariateNormal(
-            loc=torch.tensor(obs2_center[..., :idx]),
-            covariance_matrix=torch.tensor(rel_cov[..., :idx, :idx]),
+            loc=torch.tensor(obs2_center[..., :seg_idx]),
+            covariance_matrix=torch.tensor(rel_cov[..., :seg_idx, :seg_idx]),
         )
         .sample((num_samples,))
         .numpy()
         if np.any(rel_cov)
-        else obs2_center[np.newaxis, ..., :idx]
+        else obs2_center[np.newaxis, ..., :seg_idx]
     )
 
     if with_orientation and rel_cov is not None and rel_cov.shape[-1] >= 3:
-        theta_std = np.sqrt(rel_cov[2, 2])
-        delta_theta = norm(scale=theta_std).rvs(size=num_samples, random_state=SEED)
+        delta_theta = points[..., seg_idx - 1] - obs2_center[..., seg_idx - 1]
         rot_theta = np.zeros((*delta_theta.shape, 3, 3))
         costheta = np.cos(delta_theta)
         sintheta = np.sin(delta_theta)
@@ -205,17 +204,28 @@ def point_collvol_mc_sampling(
         obs1_rot = obs1 @ rot_theta
         obs2_ext = obs2[None].repeat(obs1_rot.shape[0], axis=0)
         collvol, _ = collision_polygon(obs1_rot, obs2_ext)
+        if collvol.ndim == 3:
+            collvol = collvol[:, None]
     else:
         collvol, _ = collision_polygon(obs1, obs2)
-        collvol = collvol[None]
+        if collvol.ndim == 2:
+            collvol = collvol[None]
     # Check if points are inside polygon
     if points.ndim == 2:
-        points = points[:, np.newaxis, :].repeat(collvol.shape[0], axis=1)
+        points = points[:, np.newaxis, :].repeat(collvol.shape[1], axis=1)
     overlap_mask = []
-
-    for idx, poly in enumerate(collvol):
-        poly = Polygon(poly[:, :2])
-        overlap_mask.append(contains_xy(poly, points[:, idx, 0], points[:, idx, 1]))
+    if with_orientation:
+        for i in range(collvol.shape[1]):
+            tmp = []
+            for j in range(num_samples):
+                poly = Polygon(collvol[j, i, :, :2])
+                tmp.append(contains_xy(poly, points[j, i, 0], points[j, i, 1]))
+            overlap_mask.append(tmp)
+    else:
+        for idx, poly in enumerate(collvol):
+            poly = Polygon(poly[:, :2])
+            overlap_mask.append(contains_xy(poly, points[:, idx, 0], points[:, idx, 1]))
+    overlap_mask = np.array(overlap_mask)  # (num_samples, N_polygons)
     coll_prob = np.mean(overlap_mask, axis=-1).squeeze()
     return coll_prob, {"points": points, "overlap_mask": overlap_mask}
 
@@ -254,10 +264,11 @@ def point_collvol_analytic(
         return 1.0 if Polygon(obs1[:, :2]).contains(Point(obs2[0, :2])) else 0.0, {}
     if with_orientation and rel_cov is not None and rel_cov.shape[-1] >= 3:
 
-        theta_mean = rel_traj[..., -1]
-        theta_std = np.sqrt(rel_cov[2, 2])
+        theta_mean = rel_traj[..., 2]
+        theta_std = np.sqrt(rel_cov[..., 2, 2])
         # convert nodes from [-1, 1] to [theta_mean - THETA_NSTD*theta_std, theta_mean + THETA_NSTD*theta_std]
-        delta_theta = THETA_NSTD * NODES_THETA * theta_std + theta_mean
+        delta_theta = THETA_NSTD * NODES_THETA[:, None] * theta_std
+        theta_gauss = delta_theta + theta_mean
         theta_jacobian = THETA_NSTD * theta_std
         rot_theta = np.zeros((*delta_theta.shape, 3, 3))
         costheta = np.cos(delta_theta)
@@ -267,8 +278,12 @@ def point_collvol_analytic(
         rot_theta[..., 1, 0] = -sintheta
         rot_theta[..., 1, 1] = costheta
         rot_theta[..., 2, 2] = 1.0
+        # TODO Check obs1rot correct or obs2 rot needed
         obs1_rot = obs1 @ rot_theta
-        obs2_ext = obs2[None].repeat(obs1_rot.shape[0], axis=0)
+        obs2_ext = np.broadcast_to(
+            obs2[*[None] * (obs1_rot.ndim - obs2.ndim)], obs1_rot.shape
+        )
+
         collvol, points = collision_polygon(obs1_rot, obs2_ext)
     else:
         collvol, points = collision_polygon(obs1, obs2)
@@ -292,17 +307,14 @@ def point_collvol_analytic(
     exp_para_quad = -(x_quad**2) / 2
     integ_quad = erf(erf_para_quad) * np.exp(exp_para_quad)
     p_sides = (
-        1
-        / (np.sqrt(8 * np.pi))
-        * np.sum(integ_quad * WEIGHTS_XY, axis=-1)
-        * jacobian.squeeze()
+        1 / (np.sqrt(8 * np.pi)) * np.sum(integ_quad * WEIGHTS_XY * jacobian, axis=-1)
     )
-    coll_prob = np.sum(p_sides, axis=-1)
+    overlap_prob = np.sum(p_sides, axis=-1)
 
     if with_orientation:
-        theta_pdf = norm(loc=theta_mean, scale=theta_std).pdf(delta_theta)
-        coll_prob = np.sum(
-            coll_prob * theta_pdf * WEIGHTS_THETA * theta_jacobian, axis=-1
+        theta_pdf = norm(loc=theta_mean, scale=theta_std).pdf(theta_gauss)
+        overlap_prob = np.sum(
+            overlap_prob * theta_pdf * WEIGHTS_THETA[:, None] * theta_jacobian, axis=0
         )
 
-    return coll_prob.squeeze()
+    return overlap_prob.squeeze()
