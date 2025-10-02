@@ -2,10 +2,6 @@ from typing import Optional
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse
-from pyparsing import Opt
-from shapely.geometry import Point, Polygon
-from scipy.spatial import ConvexHull
-from shapely.geometry import Polygon
 
 
 def collision_polygon(poly_corners_1: np.ndarray, poly_corners_2: np.ndarray):
@@ -29,32 +25,6 @@ def collision_polygon(poly_corners_1: np.ndarray, poly_corners_2: np.ndarray):
     if poly_corners_1.shape[-2] < 3:
         return poly_corners_2, poly_corners_1
 
-    # poly1_coords = np.array(polygon1.exterior.coords)
-    # poly2_coords = np.array(polygon2.exterior.coords)
-    # Ensure arrays can be broadcasted together
-    # max_dims = poly_corners_1.ndim + poly_corners_2.ndim - 2
-    # if poly_corners_1.ndim == 2 and poly_corners_2.ndim == 2:
-    #     poly_corners_1 = poly_corners_1[np.newaxis, ...]
-    #     poly_corners_2 = poly_corners_2[np.newaxis, ...]
-
-    # # Make arrays broadcastable by expanding dimensions as needed
-    # # shape1 = poly_corners_1.shape
-    # # shape2 = poly_corners_2.shape
-    # # max(len(shape1) - 2, len(shape2) - 2)
-
-    # # Expand poly_corners_1 to match broadcasting requirements
-    # i=0
-    # while poly_corners_1.ndim < max_dims:
-    #     i+=1
-    #     poly_corners_1 = poly_corners_1[np.newaxis, ...].repeat(poly_corners_2.shape[-2-i], axis=0)
-
-    # # Expand poly_corners_2 to match broadcasting requirements
-    # i=0
-    # while poly_corners_2.ndim < max_dims:
-    #     i+=1
-
-    #     poly_corners_2 = poly_corners_2[...,np.newaxis, :,:].repeat(poly_corners_2.shape[-2-i], axis=-2-i)
-    #     raise NotImplementedError("TBT Order is reversed?.")
     # Center polygons around their centroids, will be origin for Minkowski sum
     poly1_center = np.mean(poly_corners_1, axis=-2, keepdims=True)
     # poly_corners_1[..., :2] -= poly1_center[..., :2]
@@ -62,10 +32,7 @@ def collision_polygon(poly_corners_1: np.ndarray, poly_corners_2: np.ndarray):
 
     poly2_shifted = poly_corners_2 - poly2_center
 
-    # # Compute Minkowski sum with polygon1's center preserved
-    # # poly1_center = np.mean(poly1_coords[:-1], axis=0)
-    # # poly2_center = np.mean(poly2_coords[:-1], axis=0)
-    # poly2_center = polygon2.centroid.coords[0]
+    # Compute Minkowski sum with polygon1's center preserved
     edges1 = np.diff(poly_corners_1, axis=-2, append=poly_corners_1[..., 0:1, :])
     edges2 = np.diff(poly2_shifted, axis=-2, append=poly2_shifted[..., 0:1, :])
     edges = np.concatenate([edges1, edges2], axis=-2)
@@ -102,28 +69,6 @@ def collision_polygon(poly_corners_1: np.ndarray, poly_corners_2: np.ndarray):
     # Extract the leftmost bottom vertices using advanced indexing
     leftmost_bottom1 = poly_corners_1[(*batch_indices, leftmost_idx1)]
     leftmost_bottom2 = poly2_shifted[(*batch_indices, leftmost_idx2)]
-    # batch_indices = np.arange(poly_corners_1.shape[0])
-    # leftmost_bottom1 = poly_corners_1[batch_indices, leftmost_idx1]
-    # leftmost_bottom2 = poly2_shifted[batch_indices, leftmost_idx2]
-
-    # batch_indices = [np.arange(i) for i in poly_corners_1.shape[:-2]]
-    # import itertools
-    # batch_indices = np.array(list(itertools.product(*batch_indices)))
-    # batch_indices = np.arange( np.prod(poly_corners_1.shape[:-2]))
-    # leftmost_bottom1 = poly_corners_1[batch_indices, leftmost_idx1]
-    # leftmost_bottom2 = poly2_shifted[batch_indices, leftmost_idx2]
-
-    # bottom1 = poly_corners_1[poly_corners_1[..., 1] == min_y1]
-    # bottom2 = poly2_shifted[poly2_shifted[..., 1:2] == min_y2]
-    # bottom1_min_x = np.min(bottom1[..., 0], axis=-1, keepdims=True)
-    # bottom2_min_x = np.min(bottom2[..., 0], axis=-1, keepdims=True)
-    # # leftmost_bottom1 = bottom1[bottom1[..., 0] ==
-    # leftmost_bottom1 = poly_corners_1[poly_corners_1[..., 1] == min_y1][np.argmin(poly_corners_1[poly_corners_1[..., 1] == min_y1, 0], axis=-1, keepdims=True)]
-    # leftmost_bottom2 = poly2_shifted[poly2_shifted[..., 1] == min_y2][np.argmin(poly2_shifted[poly2_shifted[..., 1] == min_y2, 0], axis=-1, keepdims=True)]
-
-    # bottom_poly1 = poly_corners_1[np.argmin(poly_corners_1[:, 1])]
-    # bottom_poly2 = poly_corners_2[np.argmin(poly_corners_2[:, 1])]
-    # bottommost_combination = bottom_poly1 + bottom_poly2
     minkowski_coords = [leftmost_bottom1 + leftmost_bottom2]
     for idx in sorted_indices[..., :-1].T:
         minkowski_coords.append(minkowski_coords[-1] + edges[(*batch_indices, idx.T)])
@@ -142,11 +87,11 @@ def simple_prediction(
 ):
     """
     Simple constant velocity model prediction with EKF for position and orientation.
-    State: [x, y, theta, vx, vy]
-    Cov: 5x5 covariance matrix
+    State: [x, y, theta, v]
+    Cov: 4x4 covariance matrix
     Args:
-        initial_state: np.array([x, y, theta, vx, vy])
-        initial_cov: 5x5 np.array, initial covariance matrix
+        initial_state: np.array([x, y, theta, v])
+        initial_cov: 4x4 np.array, initial covariance matrix
         dt: float, time step
     """
 
@@ -157,7 +102,7 @@ def simple_prediction(
     # process noise
     q = 0**2
     sigma_theta = 0.0
-    Q = np.zeros((5, 5))
+    Q = np.zeros((4, 4))
     # Position x block
     Q[0, 0] = 0.25 * dt**4 * q
     Q[0, 3] = 0.5 * dt**3 * q
@@ -165,9 +110,9 @@ def simple_prediction(
     Q[3, 3] = dt**2 * q
     # Position y block
     Q[1, 1] = 0.25 * dt**4 * q
-    Q[1, 4] = 0.5 * dt**3 * q
-    Q[4, 1] = 0.5 * dt**3 * q
-    Q[4, 4] = dt**2 * q
+    Q[1, 3] = 0.5 * dt**3 * q
+    Q[3, 1] = 0.5 * dt**3 * q
+    # Q[4, 4] = dt**2 * q
     # Orientation noise (simple random walk)
     Q[2, 2] = sigma_theta**2 * dt
 
@@ -182,45 +127,31 @@ def simple_prediction(
     )
     traj[..., 0, :] = initial_state
     covs[..., 0, :, :] = initial_cov
-    theta0 = initial_state[..., 2]
-    # R_loc_trans = np.tile(np.eye(2), (*initial_state.shape[1:-1], 1, 1))
-    # R_loc_trans[..., 0, 0] = np.cos(np.mean(theta0, axis=0))
-    # R_loc_trans[..., 0, 1] = np.sin(np.mean(theta0, axis=0))
-    # R_loc_trans[..., 1, 0] = -np.sin(np.mean(theta0, axis=0))
-    # R_loc_trans[..., 1, 1] = np.cos(np.mean(theta0, axis=0))
-    R_loc_trans = np.tile(np.eye(2), (*initial_state.shape[:-1], 1, 1))
-    R_loc_trans[..., 0, 0] = np.cos(theta0)
-    R_loc_trans[..., 0, 1] = np.sin(theta0)
-    R_loc_trans[..., 1, 0] = -np.sin(theta0)
-    R_loc_trans[..., 1, 1] = np.cos(theta0)
+
     for t in range(1, num_steps + 1):
         state = traj[..., t - 1, :]
         cov = covs[..., t - 1, :, :]
-        xy = state[..., :2]
         theta = state[..., 2]
-        v = state[..., 3:]
+        v = state[..., 3]
         R = np.tile(np.eye(2), (*state.shape[:-1], 1, 1))
-        R[..., 0, 0] = np.cos(theta)
-        R[..., 0, 1] = -np.sin(theta)
-        R[..., 1, 0] = np.sin(theta)
-        R[..., 1, 1] = np.cos(theta)
+        costheta = np.cos(theta)
+        sintheta = np.sin(theta)
+        R[..., 0, 0] = costheta
+        R[..., 0, 1] = -sintheta
+        R[..., 1, 0] = sintheta
+        R[..., 1, 1] = costheta
 
-        v_loc = R_loc_trans @ v[..., :, np.newaxis]
-        # Nonlinear motion model: x, y, theta, v
-        # new_xy = xy + self.dt * v #
-        new_xy = xy + dt * (R @ v_loc).squeeze(-1)
-        next_state = np.concatenate([new_xy, state[..., 2:]], axis=-1)
+        zero = np.zeros_like(state[..., 1])
+        next_state = state + dt * np.stack(
+            [v * costheta, v * sintheta, zero, zero], axis=-1
+        )
+        F = np.tile(np.eye(state.shape[-1]), (*state.shape[:-1], 1, 1))
+        F[..., 0, 2] = -dt * v * sintheta
+        F[..., 0, 3] = dt * costheta
+        F[..., 1, 2] = dt * v * costheta
+        F[..., 1, 3] = dt * sintheta
 
-        # Jacobian of motion model w.r.t state
-        F = np.tile(np.eye(5), (*state.shape[:-1], 1, 1))
-        vtheta = dt * R
-        J = np.array([[0, -1], [1, 0]])  # 90 degree rotation matrix
-        xytheta = dt * np.einsum("...bij,...jk, ...bk->...bi", R, J, v_loc.squeeze(-1))
-        F[..., 0, 2] = xytheta[..., 0]
-        F[..., 0, 3:] = vtheta[..., 0, :]
-        F[..., 1, 2] = xytheta[..., 1]
-        F[..., 1, 3:] = vtheta[..., 1, :]
-        next_cov = np.einsum("...bij,...bjk,...blk->...bil", F, cov, F) + Q
+        next_cov = np.einsum("...ij,...jk,...lk->...il", F, cov, F) + Q
         traj[..., t, :] = next_state
         covs[..., t, :, :] = next_cov
 
@@ -261,10 +192,6 @@ def convolve_distributions(
         """
         assert 0 < a <= 2, f"a must be in (0,2], got {a}"
         assert all(-1 <= i <= 1 for i in b), f"all b must be in [-1,1], got {b}"
-        # if np.ndim(dev[0]) == 2:
-        #     assert all(np.all(np.linalg.eigvals(s) > 0) for s in dev), f"sig must be positive definite,  got {dev}"
-        # else:
-        #     assert all(s > 0 for s in dev), f"sig must be > 0, got {dev}"
 
         rel_mu = sum(mu)
         dev_pow = [d**a for d in dev]
@@ -277,29 +204,17 @@ def convolve_distributions(
     devs2 = devs2 if devs2 is not None else 0
     match dist:
         case "Gaussian" | "Normal" | "Cauchy":
-            # Create all combinations of obs_mu and ego_mu
-            # mus2_expanded = np.array([mus2[i] for i in range(len(mus2)) for j in range(len(mus1))])
-            # mus1_expanded = np.array([mus1[j] for i in range(len(mus2)) for j in range(len(mus1))])
-
-            # mus = [mus2_expanded, -mus1_expanded]
 
             mus = [mus2, -mus1]
-            # Similarly expand the covariance matrices if they exist
-            # devs2_expanded = np.array([devs2[i] for i in range(len(devs2)) for j in range(len(devs1))])
-            # devs1_expanded = np.array([devs1[j] for i in range(len(devs2)) for j in range(len(devs1))])
-            # sigs = [devs2_expanded, devs1_expanded]
             sigs = [devs2, devs1]
-            # else:
-            #     sig = [obs_dev, ego_dev]
-            # mu = [obs_mu, -ego_mu]
-            # sig = [obs_dev, ego_dev]
+
             a = 1
             b = [0, 0]
             rel_mean, rel_cov = stable(mus, sigs, a, b)
             return rel_mean, rel_cov
         case "Levy":
-            mu = [obs_mu, -ego_mu]
-            sig = [obs_dev, ego_dev]
+            mu = [mus2, -mus1]
+            sig = [devs2, devs1]
             a = 0.5
             b = [1, 1]
             raise NotImplementedError("Levy distribution not implemented yet.")
@@ -330,7 +245,6 @@ def visualize_overlap_point_poly(poly_corners, sampled_points, inside_mask):
         alpha=0.1,
     )
     ax.add_patch(poly)
-    # ax.plot(xy[:, 0], xy[:, 1], color='blue', label='Polygon Boundary')
 
     # Plot points
     ax.scatter(
@@ -531,5 +445,3 @@ def visualize_traj_poly(
     plt.title("Trajectory with Polygon Visualization")
     plt.xlabel("X-axis")
     plt.ylabel("Y-axis")
-
-    # plt.show()

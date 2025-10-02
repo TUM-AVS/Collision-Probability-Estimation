@@ -1,10 +1,10 @@
-import time
-from tabulate import tabulate
+"""
+Script to test collision probability estimation methods for two uncertain polygons.
+"""
+
 import numpy as np
-from shapely.geometry import Polygon
 from utils import (
     convolve_distributions,
-    collision_polygon,
     visualize_overlap_point_poly,
     visualize_overlap_poly_poly,
 )
@@ -105,8 +105,7 @@ coll_prob, visu_dict = cpo.point_collvol_mc_sampling(
     with_orientation=False,
 )
 
-# num_samples, rel_pos, rel_cov,
-# ego_poly_corners)
+
 print(f"MC Sampling coll prob (Point-Rect): {coll_prob:.4f}")
 
 # visualize_overlap_point_poly(ego_poly_corners, visu_dict["points"], visu_dict["overlap_mask"])
@@ -155,8 +154,6 @@ coll_prob, visu_dict = cpo.poly_poly_mc_sampling(
 print(f"MC Sampling coll prob (Poly-Poly ego fixed at origin): {coll_prob:.4f}")
 # visualize_overlap_poly_poly(visu_dict["ego_rects"], visu_dict["obs_rects"], visu_dict["overlap_mask"])
 
-# coll_vol_corners = collision_polygon(ego_poly_corners, obs_poly_corners)
-
 # MC Sampling coll_vol-point
 coll_prob, visu_dict_coll_vol = cpo.point_collvol_mc_sampling(
     obs1=ego_poly_corners,
@@ -169,7 +166,7 @@ coll_prob, visu_dict_coll_vol = cpo.point_collvol_mc_sampling(
 print(f"MC Sampling coll prob (Point-CollVol): {coll_prob:.4f}")
 
 # visualize_overlap_point_poly(coll_vol_corners, visu_dict_coll_vol["points"], visu_dict_coll_vol["overlap_mask"])
-# data.append(["Poly MC Sampling", f"{coll_prob:.4f}", f"{t*1e3:.1f}"])
+
 
 coll_prob = cpo.point_collvol_analytic(
     obs1=ego_poly_corners,
@@ -179,7 +176,7 @@ coll_prob = cpo.point_collvol_analytic(
     with_orientation=False,
 )
 print(f"Analytic coll prob (Poly-Poly): {coll_prob:.4f}")
-# print(tabulate(data, headers=headers, tablefmt="simple"))  # fancy_grid pipe grid
+
 
 # COLLISION EGO - POINT WITH ORIENTATION ############
 # MC Sampling point-poly

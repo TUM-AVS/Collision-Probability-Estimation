@@ -3,15 +3,15 @@ Collision probability estimation based on spatial overlap of polygon and point.
 Following methods are implemented:
 1) Monte Carlo sampling for polygon-polygon collision probability.
 2) Inclusion-Exclusion principle for rectangle (axis-aligned).
-1) Monte Carlo sampling get probability of point inside polygon.
-3) Analytic solution for point-in-polygon collision probability.
+3) Monte Carlo sampling for point-in-polygon collision probability.
+4) Analytic solution for point-in-polygon collision probability.
 """
 
 from typing import Optional
 
 import numpy as np
 import torch
-from torch.distributions import MultivariateNormal, Normal
+from torch.distributions import MultivariateNormal
 from scipy.stats import multivariate_normal, norm
 from shapely.geometry import Polygon
 from shapely import contains_xy
@@ -22,7 +22,6 @@ from params import SEED, NODES_XY, WEIGHTS_XY, NODES_THETA, WEIGHTS_THETA, THETA
 from utils import collision_polygon, convolve_distributions
 
 
-# TODO add different distributions (Cauchy, Levy, etc.)!
 def poly_poly_mc_sampling(
     obs1: np.ndarray,
     obs2: np.ndarray = None,
@@ -32,16 +31,17 @@ def poly_poly_mc_sampling(
     with_orientation: bool = False,
 ):
     """
-
+    Monte Carlo sampling to compute the collision probability between two polygons.
     Parameters:
+        obs1: ndarray: Nx2/3 array of first polygon vertices.
+        obs2: ndarray: Mx2/3 array of second polygon vertices, Could also be a single point.
+        obs1_cov: ndarray: 2x2 / 3x3 covariance matrix of polygon position uncertainty.
+        obs2_cov: ndarray: 2x2 / 3x3 covariance matrix of point position uncertainty.
+        with_orientation (bool): Whether to consider orientation uncertainty.
         num_samples (int): Number of random samples.
-        poly1_corners (ndarray): Nx2/3 array of first polygon vertices.
-        poly2_corners (ndarray): Mx2/3 array of second polygon vertices.
-        pos_mean (ndarray): Mean position (x, y [theta]).
-        pos_cov (ndarray): 2x2 / 3x3 covariance matrix.
-
     Returns:
         float: Estimated collision probability.
+        dict: Additional data (sampled points, overlap mask).
     """
     assert (
         obs1.shape[-1] >= 2 and obs2.shape[-1] >= 2
@@ -117,7 +117,6 @@ def point_rect_inc_excl(
     Returns:
         proportion (float): Estimated probability mass inside the rectangle.
     """
-    # xytheta = np.array(ego_poly.boundary.coords)
     assert obs1.shape[0] == 4, "Rectangle must have 4 boundary points (closed polygon)."
     _, rel_cov = convolve_distributions(devs1=obs1_cov, devs2=obs2_cov, dist="Gaussian")
     xy = obs1[:, :2]
@@ -154,16 +153,17 @@ def point_collvol_mc_sampling(
     with_orientation: bool = False,
 ):
     """
-    Monte Carlo sampling to test if points lie within a polygon. If 2 polygons are provided, the collision polygon is computed first.
-
+    Monte Carlo sampling to compute the collision probability of a point (Gaussian distributed) inside a polygon.
     Parameters:
         obs1: ndarray: Nx2/3 array of first polygon vertices.
         obs2: ndarray: Mx2/3 array of second polygon vertices, Could also be a single point.
-
-
+        obs1_cov: ndarray: 2x2 / 3x3 covariance matrix of polygon position uncertainty.
+        obs2_cov: ndarray: 2x2 / 3x3 covariance matrix of point position uncertainty.
+        with_orientation (bool): Whether to consider orientation uncertainty.
+        num_samples (int): Number of random samples.
     Returns:
         float: Estimated collision probability.
-        dict: Additional data (sampled points, inside mask).
+        dict: Additional data (sampled points, overlap mask).
     """
     seg_idx = 3 if with_orientation else 2
     if obs2.ndim == 1:
@@ -201,9 +201,9 @@ def point_collvol_mc_sampling(
         rot_theta[..., 1, 0] = -sintheta
         rot_theta[..., 1, 1] = costheta
         rot_theta[..., 2, 2] = 1.0
-        obs1_rot = obs1 @ rot_theta
-        obs2_ext = obs2[None].repeat(obs1_rot.shape[0], axis=0)
-        collvol, _ = collision_polygon(obs1_rot, obs2_ext)
+        obs2_rot = obs2 @ rot_theta
+        obs1_ext = obs1[None].repeat(obs2_rot.shape[0], axis=0)
+        collvol, _ = collision_polygon(obs1_ext, obs2_rot)
         if collvol.ndim == 3:
             collvol = collvol[:, None]
     else:
@@ -238,15 +238,17 @@ def point_collvol_analytic(
     with_orientation: bool = False,
 ):
     """
-    Analytic solution for point-in-polygon collision probability.
+    Analytic solution to compute the collision probability of a point (Gaussian distributed) inside a polygon.
     Parameters:
-        pos_mean (ndarray): Mean position of point (x, y [theta]).
-        pos_cov (ndarray): 2x2 / 3x3 covariance matrix of point.
-        poly_corners (ndarray): Nx2/3 array of polygon vertices.
-
+        obs1: ndarray: Nx2/3 array of first polygon vertices.
+        obs2: ndarray: Mx2/3 array of second polygon vertices, Could also be a single point.
+        obs1_cov: ndarray: 2x2 / 3x3 covariance matrix of polygon position uncertainty.
+        obs2_cov: ndarray: 2x2 / 3x3 covariance matrix of point position uncertainty.
+        with_orientation (bool): Whether to consider orientation uncertainty.
     Returns:
         float: Estimated collision probability.
     """
+
     if obs2.ndim == 1:
         obs2 = obs2[np.newaxis, :]
     obs1_center = np.mean(obs1, axis=-2)
@@ -261,7 +263,7 @@ def point_collvol_analytic(
     )
     if rel_cov is None:
         raise NotImplementedError("Analytic solution not implemented for this case.")
-        return 1.0 if Polygon(obs1[:, :2]).contains(Point(obs2[0, :2])) else 0.0, {}
+
     if with_orientation and rel_cov is not None and rel_cov.shape[-1] >= 3:
 
         theta_mean = rel_traj[..., 2]
@@ -278,13 +280,13 @@ def point_collvol_analytic(
         rot_theta[..., 1, 0] = -sintheta
         rot_theta[..., 1, 1] = costheta
         rot_theta[..., 2, 2] = 1.0
-        # TODO Check obs1rot correct or obs2 rot needed
-        obs1_rot = obs1 @ rot_theta
-        obs2_ext = np.broadcast_to(
-            obs2[*[None] * (obs1_rot.ndim - obs2.ndim)], obs1_rot.shape
+        obs2_rot = obs2 @ rot_theta
+        obs1_ext = np.broadcast_to(
+            obs1[*[None] * (obs2_rot.ndim - obs1.ndim)],
+            (obs2_rot.shape[:-2] + obs1.shape[-2:]),
         )
 
-        collvol, points = collision_polygon(obs1_rot, obs2_ext)
+        collvol, points = collision_polygon(obs1_ext, obs2_rot)
     else:
         collvol, points = collision_polygon(obs1, obs2)
         collvol = collvol[None]

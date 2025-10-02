@@ -1,0 +1,46 @@
+[tool.poetry]
+name = "collision_probability_estimation"
+version = "2025.01"
+description = "python package for analytic collision probability calculation."
+license = "LGPL-3.0-or-later"
+authors = [
+    "XXX <XXX@XXX.XXX>",
+]
+maintainers = [
+    "XXX <XXX@XXX.XXX>",
+]
+readme = "README.md"
+
+packages = [
+    { include = "scripts" },
+    { include = "ml_planner"},
+]
+
+[tool.poetry.dependencies]
+
+python = ">=3.12"
+
+matplotlib = "^3.10.6"
+numpy = "^2.3.3"
+torch = "^2.8.0"
+shapely ="^2.1.1"
+
+
+[tool.poetry.group.docs]
+optional = true
+
+[tool.poetry.group.docs.dependencies]
+sphinx = ">=6.2.1"
+
+[tool.poetry.group.dev]
+optional = true
+
+[tool.poetry.dev-dependencies]
+pytest = "^8.2"
+
+[tool.poetry.group.dev.dependencies]
+mypy = "^1.5.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
