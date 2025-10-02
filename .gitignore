@@ -1,2 +1,2 @@
-runtime_comparison.py
+venv/*
 *.pyc
