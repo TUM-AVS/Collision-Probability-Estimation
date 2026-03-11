@@ -1,55 +1,116 @@
 # Collision Probability Estimation
 
-A Python library for calculating collision probabilities between objects in space, supporting both individual state analysis and trajectory-based predictions.
+A Python library for calculating collision probabilities between uncertain objects, supporting both individual state analysis and trajectory-based predictions. Implements analytic, Monte Carlo, and distance-based methods with optional PyTorch acceleration.
 
 ## Features
 
-- **State-based collision probability**: Calculate overlap probability for individual orbital states
-- **Trajectory-based collision probability**: Analyze collision risk along complete orbital trajectories
-- Efficient algorithms optimized for space surveillance applications
-- Easy-to-use API with comprehensive examples
+- **State-based collision probability**: Collision probability for individual states using multiple methods
+- **Trajectory-based collision probability**: Analyze collision risk along complete trajectories over a time horizon
+- NumPy/SciPy core implementation — no GPU required
+- Optional PyTorch backend for GPU acceleration
+- Orientation-aware collision volume computation
+- Easy-to-use API and comprehensive exemplaric benchmark scripts
 
 ## Installation
 
+The Code is tested with Python ≥ 3.11 and Python ≤ 3.14. 
+
+Uses [`uv`](https://github.com/astral-sh/uv) as recommended build backend.
+
 ### From source
+
 ```bash
-git clone https://xxxx/Collision-Probability-Estimation.git
-cd Collision-Probability-Estimation
-pip install -e .
+git clone https://github.com/TUM-AVS/Collision-Probability-Estimation.git
+cd collision-probability-estimation
 ```
 
+### Using `uv` (recommended)
+
+Install `uv` if not already available:
+```bash
+curl -Lsf https://astral.sh/uv/install.sh | sh
+```
+
+Default install (NumPy/SciPy only):
+```bash
+uv sync
+```
+
+With optional extras:
+```bash
+# With PyTorch backend
+uv sync --extra use_torch
+
+# With plotting support
+uv sync --extra plot
+
+# With both
+uv sync --extra use_torch --extra plot
+```
+
+With a specific Python version:
+```bash
+uv sync --python 3.12
+# or pin permanently
+echo "3.12" > .python-version && uv sync
+```
+
+### Using `pip`
+
+Default install (NumPy/SciPy only):
+```bash
+pip install .
+```
+
+With optional extras:
+```bash
+# With PyTorch backend
+pip install ".[use_torch]"
+
+# With plotting support
+pip install ".[plot]"
+
+# With both
+pip install ".[use_torch,plot]"
+```
+
+### Summary of optional extras
+
+| Extra | Installs | Required for |
+|---|---|---|
+| *(none)* | `numpy`, `scipy` | Core NumPy methods |
+| `use_torch` | `torch` | PyTorch-accelerated methods, `--use_torch` flag |
+| `plot` | `matplotlib` | `--plot` flag in benchmark scripts |
 
 ## Quick Start
 
 ### Individual State Collision Probability
 
 ```python
-from coll_state_overlap import point_collvol_analytic
+from collision_probability_estimation.np_impl.coll_state_overlap import point_collvol_analytic
 
-# Example usage for state-based collision probability
-state1 = {...}  # Object 1 state vector (x,y,heading) at each corner of polygon
-state2 = {...}  # Object 2 state vector (x,y,heading) at each corner of polygon
-covariance1 = {...}  # Object 1 covariance matrix (3x3)
-covariance2 = {...}  # Object 2 covariance matrix (3x3)
+# Object polygons: (n_corners, 3) arrays of (x, y, heading) — counter-clockwise
+obs1 = ...   # shape (n_corners, 3)
+obs2 = ...   # shape (n_corners, 3)
+cov  = ...   # relative covariance matrix (3x3)
 
-probability = point_collvol_analytic(state1, state2, covariance1, covariance2)
+probability = point_collvol_analytic(obs1, obs2, cov)
 print(f"Collision probability: {probability}")
 ```
 
 ### Trajectory-based Collision Probability
 
 ```python
-from coll_trajectories import boundary_crossing
+from collision_probability_estimation.np_impl.coll_trajectories import boundary_crossing
 
-# Example usage for trajectory-based analysis
-corners1 = {}  # Object 1 polygon (x,y,heading) at each corner 
-corners2 = {}  # Object 2 polygon (x,y,heading) at each corner 
-trajectory1 = {...}  # Object 1 trajectory nx(x,y,theta,v)
-trajectory2 = {...}  # Object 2 trajectory nx(x,y,theta,v)
-covariance1 = {...}  # Object 1 covariance matrix (nx4x4)
-covariance2 = {...}  # Object 2 covariance matrix (nx4x4)
+# corners: (n_corners, 3)  —  trajectories: (num_steps, 4) with state (x, y, theta, v)
+# covariances: (num_steps, 4, 4)
 
-probability, _ = boundary_crossing(corners1, trajectory1, trajectory2, covariance1, covariance2, corners2)
+probability, p_cumulative = boundary_crossing(
+    corners_obs1=corners1, trajs_obs1=traj1, trajs_obs2=traj2,
+    trajs_obs1_covs=cov1,  trajs_obs2_covs=cov2,
+    corners_obs2=corners2, dt=0.1,
+)
 print(f"Trajectory collision probability: {probability}")
 ```
 
@@ -57,45 +118,51 @@ print(f"Trajectory collision probability: {probability}")
 
 ### 1. Individual State Methods (`coll_state_overlap.py`)
 
-The following collision probability methods are implemented for individual states:
-
-Following methods are implemented:
-1) **Monte Carlo sampling** for **polygon-polygon** collision probability.
-2) **Inclusion-Exclusion principle** for rectangle (axis-aligned).
-3) **Monte Carlo sampling** for **point-in-collision-volume** collision probability.
-4) **Analytic solution** for point-in-polygon collision probability.
+| # | Method | Function |
+|---|--------|----------|
+| 1 | Monte Carlo sampling — polygon-polygon | `poly_poly_mc_sampling` |
+| 2 | Inclusion-Exclusion (rect) using bivariate normal CDF | `point_rect_incl_excl` |
+| 3 | Monte Carlo sampling — point-in-collision-volume | `point_collvol_mc_sampling` |
+| 4 | Analytic solution — point-in-collision-volume | `point_collvol_analytic` |
+| 5 | Mahalanobis distance-based collision probability | `mahalanobis_distance` |
+| 6 | Corner Mahalanobis (boundary distance) | `mahalanobis_distance(..., use_corners=True)` |
 
 ### 2. Trajectory Methods (`coll_trajectories.py`)
 
-Trajectory-based collision probability methods include:
+| # | Method | Function |
+|---|--------|----------|
+| 1 | Monte Carlo Sampling — complete trajectories | `point_collvol_mc_traj_sampling` |
+| 2 | Boundary crossing — complete trajectories (analytic) | `boundary_crossing` |
+| 3 | Monte Carlo sampling — per time step | `point_collvol_mc_state_sampling` |
+| 4 | Analytic solution — per time step | `traj_collvol_analytic` |
+| 5 | Inclusion-Exclusion (rect) — per time step | `traj_rect_incl_excl` |
+| 6 | Mahalanobis distance — per time step | `traj_mahalanobis_distance` |
+| 7 | Corner Mahalanobis (boundary distance) — per time step | `traj_corner_mahalanobis_distance` |
 
-1) **Monte Carlo Sampling** for **complete trajectories**.
-2) **Boundary crossing method** for complete trajectories.
-3) **Monte Carlo sampling** for **each time step**.
-4) **Analytic solution** for point-in-polygon collision probability at **each time step**.
+All trajectory methods accept `with_orientation: bool` to enable orientation-aware collision volume computation.
 
 ## Usage Examples
 
-### Running the Scripts
+### Running the Benchmark Scripts
 
-Execute the provided example scripts:
+The package exposes two entry-point scripts:
 
 ```bash
-# Run state-based collision probability examples
-python scripts_overlap.py
+# State-based collision probability benchmark
+uv run state_coll_prob
 
-# Run trajectory-based collision probability examples  
-python scripts_coll_traj.py
+# Trajectory-based collision probability benchmark
+uv run traj_coll_prob
+
+# With optional flags
+uv run traj_coll_prob --use_torch            # include PyTorch methods
+uv run --extra plot traj_coll_prob --plot    # show probability-over-time plots
+uv run --extra plot state_coll_prob --plot   # show overlap visualizations
 ```
 
+Both scripts print a formatted results table with method name, orientation flag, backend, collision probability, and wall-clock time.
 
-## Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Submit a pull request
 
 ## License
 
@@ -103,8 +170,29 @@ This project is licensed under the [LGPL-3.0 License](LICENSE).
 
 ## References
 
-xxx TBD after review
-
+```bibtex
+@article{kaufeld2025preciseefficientcollisionprediction,
+      title={Precise and Efficient Collision Prediction under Uncertainty in Autonomous Driving}, 
+      author={Marc Kaufeld and Johannes Betz},
+      year={2025},
+      eprint={2510.05729},
+      archivePrefix={arXiv},
+      primaryClass={cs.RO},
+      url={https://arxiv.org/abs/2510.05729}, 
+}
+```
 ## Contact
 
-xxx TBD after review
+[Marc Kaufeld](mailto:marc.kaufeld@tum.de),
+Professorship Autonomous Vehicle Systems,
+School of Engineering and Design,
+Technical University of Munich,
+85748 Garching,
+Germany
+
+[Johannes Betz](mailto:johannes.betz@tum.de),
+Professorship Autonomous Vehicle Systems,
+School of Engineering and Design,
+Technical University of Munich,
+85748 Garching,
+Germany

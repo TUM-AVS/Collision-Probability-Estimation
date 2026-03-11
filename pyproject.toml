@@ -1,46 +1,31 @@
-[tool.poetry]
-name = "collision_probability_estimation"
-version = "2025.01"
-description = "python package for analytic collision probability calculation."
+[project]
+name = "collision-probability-estimation"
+version = "0.1.0"
+description = "Python package for analytic collision probability calculation of vehicle trajectories under state uncertainties"
 license = "LGPL-3.0-or-later"
-authors = [
-    "XXX <XXX@XXX.XXX>",
-]
-maintainers = [
-    "XXX <XXX@XXX.XXX>",
-]
 readme = "README.md"
-
-packages = [
-    { include = "scripts" },
-    { include = "ml_planner"},
+authors = [
+    { name = "Marc Kaufeld", email = "marc.kaufeld@tum.de" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.4.3",
+    "scipy>=1.17.1",
+    "shapely>=2.1.2",
 ]
 
-[tool.poetry.dependencies]
+[project.optional-dependencies]
+use_torch = [
+    "torch>=2.10.0",
+]
+plot = [
+    "matplotlib>=3.10.8",
+]
 
-python = ">=3.12"
-
-matplotlib = "^3.10.6"
-numpy = "^2.3.3"
-torch = "^2.8.0"
-shapely ="^2.1.1"
-
-
-[tool.poetry.group.docs]
-optional = true
-
-[tool.poetry.group.docs.dependencies]
-sphinx = ">=6.2.1"
-
-[tool.poetry.group.dev]
-optional = true
-
-[tool.poetry.dev-dependencies]
-pytest = "^8.2"
-
-[tool.poetry.group.dev.dependencies]
-mypy = "^1.5.1"
+[project.scripts]
+state_coll_prob = "script_collision_state:main"
+traj_coll_prob = "script_collision_trajectory:main"
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build>=0.10.8,<0.11.0"]
+build-backend = "uv_build"
